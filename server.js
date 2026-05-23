@@ -186,6 +186,7 @@ app.get("/api/rooms/:id", (req, res) => {
     messages,
     videoEnabled: DAILY_ENABLED,
     call: call ? { url: call.url, expiresAt: call.expiresAt } : null,
+    game: gameView(room.game, viewerId),
   });
 });
 
@@ -380,6 +381,139 @@ app.delete("/api/rooms/:id/call", (req, res) => {
   room.call = null;
   room.lastActivity = Date.now();
   res.json({ ok: true });
+});
+
+// ── Tic-tac-toe ──────────────────────────────────────────────────
+// One game per room, kept in room.game:
+//   { board:[9], players:{X:senderId, O:senderId}, nicks:{X,O},
+//     turn:"X"|"O", winner:null|"X"|"O"|"draw", line:[i,i,i]|null,
+//     updatedAt }
+const WIN_LINES = [
+  [0,1,2],[3,4,5],[6,7,8], // rows
+  [0,3,6],[1,4,7],[2,5,8], // columns
+  [0,4,8],[2,4,6],         // diagonals
+];
+
+function evaluateBoard(board) {
+  for (const [a, b, c] of WIN_LINES) {
+    if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+      return { winner: board[a], line: [a, b, c] };
+    }
+  }
+  if (board.every((cell) => cell)) return { winner: "draw", line: null };
+  return { winner: null, line: null };
+}
+
+function freshGame() {
+  return {
+    board: Array(9).fill(""),
+    players: { X: null, O: null },
+    nicks: { X: "", O: "" },
+    turn: "X",
+    winner: null,
+    line: null,
+    updatedAt: Date.now(),
+  };
+}
+
+// Client view of the game, with this viewer's mark worked out.
+function gameView(game, viewerId) {
+  if (!game) return null;
+  let yourMark = null;
+  if (game.players.X === viewerId) yourMark = "X";
+  else if (game.players.O === viewerId) yourMark = "O";
+  return {
+    board: game.board,
+    turn: game.turn,
+    winner: game.winner,
+    line: game.line,
+    nicks: game.nicks,
+    seats: { X: Boolean(game.players.X), O: Boolean(game.players.O) },
+    yourMark,
+  };
+}
+
+// Start a new game (or restart) in a room.
+app.post("/api/rooms/:id/game", (req, res) => {
+  const room = rooms.get(req.params.id);
+  if (!room) return res.status(404).json({ error: "Room not found." });
+  if (room.isPrivate && clean(req.body.code, 12) !== room.code) {
+    return res.status(403).json({ error: "This room is private." });
+  }
+  const senderId = clean(req.body.senderId, 40);
+  const nick = clean(req.body.nick, MAX_NICK) || "player";
+  if (!senderId) return res.status(400).json({ error: "Missing sender id." });
+
+  // The starter takes seat X.
+  const game = freshGame();
+  game.players.X = senderId;
+  game.nicks.X = nick;
+  room.game = game;
+  room.lastActivity = Date.now();
+  res.json({ ok: true, game: gameView(game, senderId) });
+});
+
+// Join an existing game (claim the open O seat).
+app.post("/api/rooms/:id/game/join", (req, res) => {
+  const room = rooms.get(req.params.id);
+  if (!room || !room.game) {
+    return res.status(404).json({ error: "No game to join." });
+  }
+  if (room.isPrivate && clean(req.body.code, 12) !== room.code) {
+    return res.status(403).json({ error: "This room is private." });
+  }
+  const senderId = clean(req.body.senderId, 40);
+  const nick = clean(req.body.nick, MAX_NICK) || "player";
+  const game = room.game;
+
+  // Already seated? Just return the current state.
+  if (game.players.X === senderId || game.players.O === senderId) {
+    return res.json({ ok: true, game: gameView(game, senderId) });
+  }
+  if (game.players.O) {
+    return res.status(409).json({ error: "Both seats are taken." });
+  }
+  game.players.O = senderId;
+  game.nicks.O = nick;
+  room.lastActivity = Date.now();
+  res.json({ ok: true, game: gameView(game, senderId) });
+});
+
+// Make a move at square `cell` (0-8).
+app.post("/api/rooms/:id/game/move", (req, res) => {
+  const room = rooms.get(req.params.id);
+  if (!room || !room.game) {
+    return res.status(404).json({ error: "No active game." });
+  }
+  if (room.isPrivate && clean(req.body.code, 12) !== room.code) {
+    return res.status(403).json({ error: "This room is private." });
+  }
+  const senderId = clean(req.body.senderId, 40);
+  const cell = Number(req.body.cell);
+  const game = room.game;
+
+  if (game.winner) return res.status(400).json({ error: "Game is over." });
+  if (!Number.isInteger(cell) || cell < 0 || cell > 8) {
+    return res.status(400).json({ error: "Invalid square." });
+  }
+
+  // Which mark is this player?
+  let mark = null;
+  if (game.players.X === senderId) mark = "X";
+  else if (game.players.O === senderId) mark = "O";
+  if (!mark) return res.status(403).json({ error: "You're not in this game." });
+  if (mark !== game.turn) return res.status(400).json({ error: "Not your turn." });
+  if (!game.players.O) return res.status(400).json({ error: "Waiting for a second player." });
+  if (game.board[cell]) return res.status(400).json({ error: "Square taken." });
+
+  game.board[cell] = mark;
+  const result = evaluateBoard(game.board);
+  game.winner = result.winner;
+  game.line = result.line;
+  game.turn = mark === "X" ? "O" : "X";
+  game.updatedAt = Date.now();
+  room.lastActivity = Date.now();
+  res.json({ ok: true, game: gameView(game, senderId) });
 });
 
 // SPA fallback — let the client handle /r/:id deep links.
