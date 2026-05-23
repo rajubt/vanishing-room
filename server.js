@@ -27,7 +27,9 @@ const path = require("path");
 
 const app = express();
 // Allow large-ish JSON bodies because attachments arrive as base64.
-app.use(express.json({ limit: "5mb" }));
+// Body limit is set above MAX_FILE_BYTES (which includes base64 overhead)
+// so our own size check returns a clean JSON error, not a raw HTML one.
+app.use(express.json({ limit: "9mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 // ── Config ───────────────────────────────────────────────────────
@@ -36,7 +38,7 @@ const ROOM_IDLE_TTL = 15 * 60 * 1000; // empty-room cleanup window
 const MAX_BODY = 500; // chars per message
 const MAX_NICK = 24;
 const MAX_ROOM_NAME = 40;
-const MAX_FILE_BYTES = 3 * 1024 * 1024; // 3 MB cap per attachment
+const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 MB cap per attachment / voice note
 const CALL_TTL_MIN = 15; // video call room auto-expires after 15 minutes
 
 // Daily.co video — the API key comes from the environment, never hardcoded.
@@ -86,9 +88,13 @@ function parseAttachment(att) {
 
   const b64 = dataUrl.split(",")[1] || "";
   const bytes = Math.floor((b64.length * 3) / 4);
-  if (bytes > MAX_FILE_BYTES) throw "File too large (max 3 MB).";
+  if (bytes > MAX_FILE_BYTES) throw "File too large (max 5 MB).";
 
-  return { name, type, dataUrl, bytes, isImage: type.startsWith("image/") };
+  return {
+    name, type, dataUrl, bytes,
+    isImage: type.startsWith("image/"),
+    isAudio: type.startsWith("audio/"),
+  };
 }
 
 // Reactions are stored as { emoji: [senderId, senderId, ...] }.
@@ -119,6 +125,7 @@ function messageView(m, now, viewerId) {
           type: m.attachment.type,
           dataUrl: m.attachment.dataUrl,
           isImage: m.attachment.isImage,
+          isAudio: m.attachment.isAudio,
         }
       : null,
     reactions: reactionView(m.reactions, viewerId),
