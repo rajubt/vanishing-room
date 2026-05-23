@@ -76,6 +76,35 @@
   }
   .call-note.show { display: flex; }
 
+  /* tic-tac-toe panel */
+  .game-panel {
+    display: none; border-bottom: 1px solid var(--line);
+    background: #100d0a; padding: 12px 14px;
+  }
+  .game-panel.show { display: block; }
+  .game-top {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 10px;
+  }
+  .game-status { font-size: 13px; color: var(--gold); }
+  .game-board {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;
+    width: 192px; margin: 0 auto;
+  }
+  .game-cell {
+    width: 60px; height: 60px; background: #1d1913;
+    border: 1px solid var(--line-2); border-radius: 8px;
+    font-size: 30px; font-family: Georgia, serif; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink);
+  }
+  .game-cell:hover:not(.filled) { border-color: var(--gold); }
+  .game-cell.filled { cursor: default; }
+  .game-cell.markX { color: #6cc4d6; }
+  .game-cell.markO { color: #e89bbf; }
+  .game-cell.win { background: #2a2310; border-color: var(--gold); }
+  .game-btns { display: flex; gap: 6px; }
+
   input, button, select, textarea {
     font-family: inherit; font-size: 15px; outline: none;
   }
@@ -332,6 +361,10 @@
     <div class="panel-head">
       <h2 id="roomTitle">room</h2>
       <div class="head-btns">
+        <button id="gameBtn" class="btn btn-ghost" style="padding:6px 12px;"
+                title="play tic-tac-toe">✖️⭕ game</button>
+        <button id="voiceCallBtn" class="btn btn-ghost" style="padding:6px 12px;"
+                title="start a group voice call">📞 voice</button>
         <button id="callBtn" class="btn btn-ghost" style="padding:6px 12px;"
                 title="start a group video call">🎥 video</button>
         <button id="leaveBtn" class="btn btn-ghost" style="padding:6px 12px;">leave</button>
@@ -347,13 +380,25 @@
     <!-- embedded call -->
     <div id="callPanel" class="call-panel">
       <div class="call-bar">
-        <span class="label">🎥 video call — live</span>
+        <span id="callLabel" class="label">🎥 video call — live</span>
         <button id="endCallBtn" class="btn btn-ghost" style="padding:5px 12px;">
           leave call
         </button>
       </div>
       <iframe id="callFrame" class="call-frame"
               allow="camera; microphone; fullscreen; display-capture; autoplay"></iframe>
+    </div>
+
+    <!-- tic-tac-toe -->
+    <div id="gamePanel" class="game-panel">
+      <div class="game-top">
+        <span id="gameStatus" class="game-status">tic-tac-toe</span>
+        <div class="game-btns">
+          <button id="newGameBtn" class="btn" style="padding:5px 10px;">new game</button>
+          <button id="closeGameBtn" class="btn btn-ghost" style="padding:5px 10px;">close</button>
+        </div>
+      </div>
+      <div id="gameBoard" class="game-board"></div>
     </div>
 
     <div id="feed" class="feed"></div>
@@ -524,6 +569,9 @@
   // Cache of rendered message rows, keyed by message id, so render()
   // doesn't rebuild (and visibly reset) elements like the audio player.
   const msgEls = new Map();
+
+  let game = null;          // latest tic-tac-toe state from the server
+  let gamePanelOpen = false;
 
   function ensureNick() {
     while (!nick) {
@@ -820,7 +868,11 @@
     // Start the feed fresh for the new room.
     msgEls.clear();
     $("feed").innerHTML = "";
+    game = null;
+    gamePanelOpen = false;
+    $("gamePanel").classList.remove("show");
     applyCallState(data.call);
+    applyGameState(data.game);
     render();
     startPolling();
   }
@@ -829,6 +881,7 @@
   function applyCallState(call) {
     activeCallUrl = call ? call.url : null;
     $("callBtn").style.display = videoEnabled ? "" : "none";
+    $("voiceCallBtn").style.display = videoEnabled ? "" : "none";
     // Show the "join call" banner only when a call is live and I'm not in it.
     const showNote = Boolean(activeCallUrl) && !inCall;
     $("callNote").classList.toggle("show", showNote);
@@ -852,17 +905,21 @@
       // If the call ended elsewhere while I'm in it, drop me out cleanly.
       if (inCall && !data.call) endCall(false);
       applyCallState(data.call);
+      applyGameState(data.game);
       render();
     } catch { /* ignore transient errors */ }
   }
 
-  // ── video calls ──
-  async function startOrJoinCall() {
+  // ── video / voice calls ──
+  let callMode = "video"; // "video" or "voice"
+
+  async function startOrJoinCall(mode) {
     if (!current) return;
     if (!videoEnabled) {
-      toast("Video calling isn't set up on this server.");
+      toast("Calling isn't set up on this server.");
       return;
     }
+    callMode = mode === "voice" ? "voice" : "video";
     try {
       const r = await fetch("/api/rooms/" + current.id + "/call", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -883,7 +940,15 @@
   function joinCallFrame() {
     if (!activeCallUrl) return;
     inCall = true;
-    $("callFrame").src = activeCallUrl;
+    // For a voice call, ask Daily's embed to start with the camera off.
+    let src = activeCallUrl;
+    if (callMode === "voice") {
+      src += (src.includes("?") ? "&" : "?") + "camera=off";
+    }
+    $("callFrame").src = src;
+    $("callLabel").textContent = callMode === "voice"
+      ? "📞 voice call — live"
+      : "🎥 video call — live";
     $("callPanel").classList.add("show");
     $("callNote").classList.remove("show");
   }
@@ -904,12 +969,136 @@
     if (current) applyCallState(activeCallUrl ? { url: activeCallUrl } : null);
   }
 
-  $("callBtn").onclick = startOrJoinCall;
+  $("callBtn").onclick = () => startOrJoinCall("video");
+  $("voiceCallBtn").onclick = () => startOrJoinCall("voice");
   $("joinCallBtn").onclick = () => {
     if (activeCallUrl) joinCallFrame();
-    else startOrJoinCall();
+    else startOrJoinCall("video");
   };
   $("endCallBtn").onclick = () => endCall(true);
+
+  // ── tic-tac-toe ──
+  $("gameBtn").onclick = () => {
+    gamePanelOpen = !gamePanelOpen;
+    $("gamePanel").classList.toggle("show", gamePanelOpen);
+    if (gamePanelOpen) renderGame();
+  };
+  $("closeGameBtn").onclick = () => {
+    gamePanelOpen = false;
+    $("gamePanel").classList.remove("show");
+  };
+
+  $("newGameBtn").onclick = async () => {
+    if (!current) return;
+    try {
+      const r = await fetch("/api/rooms/" + current.id + "/game", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ senderId, nick, code: current.code }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { toast(data.error || "Couldn't start the game."); return; }
+      game = data.game;
+      gamePanelOpen = true;
+      $("gamePanel").classList.add("show");
+      renderGame();
+    } catch { toast("Network error starting the game."); }
+  };
+
+  async function joinGame() {
+    if (!current) return;
+    try {
+      const r = await fetch("/api/rooms/" + current.id + "/game/join", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ senderId, nick, code: current.code }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { toast(data.error || "Couldn't join the game."); return; }
+      game = data.game;
+      renderGame();
+    } catch { toast("Network error joining the game."); }
+  }
+
+  async function playMove(cell) {
+    if (!current || !game) return;
+    try {
+      const r = await fetch("/api/rooms/" + current.id + "/game/move", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ senderId, cell, code: current.code }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { toast(data.error || "Invalid move."); return; }
+      game = data.game;
+      renderGame();
+    } catch { toast("Network error making the move."); }
+  }
+
+  // Work out the status line shown above the board.
+  function gameStatusText(g) {
+    if (!g) return "No game yet — press “new game” to start.";
+    if (g.winner === "draw") return "It's a draw!";
+    if (g.winner) {
+      const who = g.nicks[g.winner] || g.winner;
+      return "🏆 " + who + " (" + g.winner + ") wins!";
+    }
+    if (!g.seats.O) {
+      return g.yourMark === "X"
+        ? "Waiting for a second player to join…"
+        : "Tap “join game” to play as O.";
+    }
+    const turnNick = g.nicks[g.turn] || g.turn;
+    const yours = g.yourMark === g.turn;
+    return (yours ? "Your turn" : turnNick + "'s turn") + " (" + g.turn + ")";
+  }
+
+  function renderGame() {
+    const board = $("gameBoard");
+    $("gameStatus").textContent = gameStatusText(game);
+
+    // If there's a game but I'm not seated and a seat is open, offer join.
+    if (game && !game.yourMark && !game.seats.O) {
+      board.innerHTML = "";
+      const join = document.createElement("button");
+      join.className = "btn";
+      join.style.cssText = "margin:6px auto;display:block;";
+      join.textContent = "join game as O";
+      join.onclick = joinGame;
+      board.appendChild(join);
+      return;
+    }
+    if (!game) {
+      board.innerHTML = "";
+      return;
+    }
+
+    // Draw the 3x3 grid.
+    board.innerHTML = "";
+    const myTurn = game.yourMark && game.yourMark === game.turn &&
+                   !game.winner && game.seats.O;
+    for (let i = 0; i < 9; i++) {
+      const cell = document.createElement("button");
+      const mark = game.board[i];
+      cell.className = "game-cell" +
+        (mark ? " filled mark" + mark : "") +
+        (game.line && game.line.includes(i) ? " win" : "");
+      cell.textContent = mark === "X" ? "✖" : mark === "O" ? "⭕" : "";
+      if (!mark && myTurn) {
+        cell.onclick = () => playMove(i);
+      }
+      board.appendChild(cell);
+    }
+  }
+
+  // Called from pollMessages with the freshest game state.
+  function applyGameState(g) {
+    // Detect a brand-new game started by someone else, so the panel pops up.
+    const hadGame = Boolean(game);
+    game = g || null;
+    if (game && !hadGame && !gamePanelOpen) {
+      gamePanelOpen = true;
+      $("gamePanel").classList.add("show");
+    }
+    if (gamePanelOpen) renderGame();
+  }
 
   async function sendMessage() {
     const input = $("msgInput");
@@ -1216,7 +1405,7 @@
   }
 
   // ── boot ──
-  loadRooms(); 
+  loadRooms();
   setInterval(loadRooms, 5000);
 
   const mm = location.pathname.match(/^\/r\/([a-z0-9]+)/i);
