@@ -521,6 +521,10 @@
   let activeCallUrl = null;  // url of the room's live call, if any
   let inCall = false;        // have I joined the call iframe?
 
+  // Cache of rendered message rows, keyed by message id, so render()
+  // doesn't rebuild (and visibly reset) elements like the audio player.
+  const msgEls = new Map();
+
   function ensureNick() {
     while (!nick) {
       nick = (prompt("Pick a nickname to chat:") || "").trim().slice(0, 24);
@@ -813,6 +817,9 @@
     $("lobby").classList.add("hidden");
     $("chat").classList.remove("hidden");
     history.replaceState(null, "", "/r/" + id);
+    // Start the feed fresh for the new room.
+    msgEls.clear();
+    $("feed").innerHTML = "";
     applyCallState(data.call);
     render();
     startPolling();
@@ -1024,132 +1031,191 @@
   }
   $("lightbox").onclick = () => $("lightbox").classList.remove("show");
 
-  function render() {
-    const feed = $("feed");
-    const now = Date.now();
-    feed.innerHTML = "";
-    const live = messages.filter((m) => m.expiresAt > now);
-    if (!live.length) {
-      feed.innerHTML = '<div class="empty-note">No messages yet — say something.</div>';
-      return;
+  // Build the full DOM row for a message. Called ONCE per message.
+  function buildMessageRow(m) {
+    const mine = m.senderId === senderId;
+    const row = document.createElement("div");
+    row.className = "msg" + (mine ? " mine" : "");
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+
+    if (!mine) {
+      const n = document.createElement("span");
+      n.className = "nick";
+      n.style.color = colorFor(m.nick);
+      n.textContent = m.nick;
+      bubble.appendChild(n);
     }
-    for (const m of live) {
-      const left = m.expiresAt - now;
-      const mine = m.senderId === senderId;
-      const row = document.createElement("div");
-      row.className = "msg" + (mine ? " mine" : "");
 
-      const bubble = document.createElement("div");
-      bubble.className = "bubble" + (left < 60000 ? " fading" : "");
-
-      if (!mine) {
-        const n = document.createElement("span");
-        n.className = "nick";
-        n.style.color = colorFor(m.nick);
-        n.textContent = m.nick;
-        bubble.appendChild(n);
+    if (m.attachment) {
+      if (m.attachment.isImage) {
+        const img = document.createElement("img");
+        img.className = "att-img";
+        img.src = m.attachment.dataUrl;
+        img.onclick = () => openLightbox(m.attachment.dataUrl);
+        bubble.appendChild(img);
+      } else if (m.attachment.isAudio) {
+        const wrap = document.createElement("div");
+        wrap.className = "att-audio";
+        const icon = document.createElement("span");
+        icon.className = "voice-ico";
+        icon.textContent = "🎤";
+        const audio = document.createElement("audio");
+        audio.controls = true;
+        audio.preload = "metadata";
+        audio.src = m.attachment.dataUrl;
+        wrap.appendChild(icon);
+        wrap.appendChild(audio);
+        bubble.appendChild(wrap);
+      } else {
+        const a = document.createElement("a");
+        a.className = "att-file";
+        a.href = m.attachment.dataUrl;
+        a.download = m.attachment.name;
+        a.innerHTML = '<span class="ico">📄</span>' +
+          '<span class="fname">' + escapeHtml(m.attachment.name) + '</span>' +
+          '<span class="dl">download</span>';
+        bubble.appendChild(a);
       }
+    }
 
-      if (m.attachment) {
-        if (m.attachment.isImage) {
-          const img = document.createElement("img");
-          img.className = "att-img";
-          img.src = m.attachment.dataUrl;
-          img.onclick = () => openLightbox(m.attachment.dataUrl);
-          bubble.appendChild(img);
-        } else if (m.attachment.isAudio) {
-          const wrap = document.createElement("div");
-          wrap.className = "att-audio";
-          const icon = document.createElement("span");
-          icon.className = "voice-ico";
-          icon.textContent = "🎤";
-          const audio = document.createElement("audio");
-          audio.controls = true;
-          audio.src = m.attachment.dataUrl;
-          wrap.appendChild(icon);
-          wrap.appendChild(audio);
-          bubble.appendChild(wrap);
-        } else {
-          const a = document.createElement("a");
-          a.className = "att-file";
-          a.href = m.attachment.dataUrl;
-          a.download = m.attachment.name;
-          a.innerHTML = '<span class="ico">📄</span>' +
-            '<span class="fname">' + escapeHtml(m.attachment.name) + '</span>' +
-            '<span class="dl">download</span>';
-          bubble.appendChild(a);
-        }
+    // body — may change on edit, so tag it for later updates
+    const bodyEl = document.createElement("span");
+    bodyEl.className = "body";
+    bodyEl.dataset.role = "body";
+    if (m.body) renderBodyWithLinks(bodyEl, m.body);
+    else bodyEl.style.display = "none";
+    bubble.appendChild(bodyEl);
+
+    // edited tag
+    const editedEl = document.createElement("span");
+    editedEl.className = "edited";
+    editedEl.dataset.role = "edited";
+    editedEl.textContent = "edited";
+    editedEl.style.display = m.edited ? "" : "none";
+    bubble.appendChild(editedEl);
+
+    // reactions container — refreshed each tick (cheap, no media inside)
+    const rc = document.createElement("div");
+    rc.className = "reactions";
+    rc.dataset.role = "reactions";
+    bubble.appendChild(rc);
+
+    // ttl countdown
+    const ttl = document.createElement("span");
+    ttl.className = "ttl";
+    ttl.dataset.role = "ttl";
+    bubble.appendChild(ttl);
+
+    // actions
+    const acts = document.createElement("div");
+    acts.className = "actions";
+    const reactBtn = document.createElement("button");
+    reactBtn.className = "act";
+    reactBtn.textContent = "😊 react";
+    reactBtn.onclick = (e) => { e.stopPropagation(); showReactPopup(reactBtn, m); };
+    acts.appendChild(reactBtn);
+    if (mine) {
+      if (m.body || !m.attachment) {
+        const ed = document.createElement("button");
+        ed.className = "act"; ed.textContent = "edit";
+        ed.onclick = () => editMessage(getMsg(m.id) || m);
+        acts.appendChild(ed);
       }
+      const del = document.createElement("button");
+      del.className = "act del"; del.textContent = "delete";
+      del.onclick = () => deleteMessage(getMsg(m.id) || m);
+      acts.appendChild(del);
+    }
+    bubble.appendChild(acts);
 
-      if (m.body) {
-        const b = document.createElement("span");
-        b.className = "body";
-        renderBodyWithLinks(b, m.body);
-        bubble.appendChild(b);
-      }
+    row.appendChild(bubble);
+    return { row, bubble };
+  }
 
-      if (m.edited) {
-        const e = document.createElement("span");
-        e.className = "edited";
-        e.textContent = "edited";
-        bubble.appendChild(e);
-      }
+  // Look up the latest data for a message id (used by action handlers).
+  function getMsg(id) { return messages.find((x) => x.id === id); }
 
-      // reaction chips
+  // Update only the lightweight, changeable parts of an existing row.
+  function refreshMessageRow(entry, m, now) {
+    const left = m.expiresAt - now;
+    entry.bubble.classList.toggle("fading", left < 60000);
+
+    const ttl = entry.bubble.querySelector('[data-role="ttl"]');
+    if (ttl) ttl.textContent = "⌛ " + fmt(left);
+
+    const editedEl = entry.bubble.querySelector('[data-role="edited"]');
+    if (editedEl) editedEl.style.display = m.edited ? "" : "none";
+
+    // body can change via edit
+    const bodyEl = entry.bubble.querySelector('[data-role="body"]');
+    if (bodyEl && bodyEl.dataset.text !== (m.body || "")) {
+      bodyEl.dataset.text = m.body || "";
+      bodyEl.textContent = "";
+      if (m.body) { renderBodyWithLinks(bodyEl, m.body); bodyEl.style.display = ""; }
+      else bodyEl.style.display = "none";
+    }
+
+    // reactions
+    const rc = entry.bubble.querySelector('[data-role="reactions"]');
+    if (rc) {
+      rc.textContent = "";
       if (m.reactions && m.reactions.length) {
-        const rc = document.createElement("div");
-        rc.className = "reactions";
         for (const re of m.reactions) {
           const chip = document.createElement("span");
           chip.className = "react-chip" + (re.mine ? " mine" : "");
           chip.textContent = re.emoji + " " + re.count;
           chip.title = re.mine ? "click to remove your reaction" : "react";
-          chip.onclick = (e) => { e.stopPropagation();
-            toggleReaction(m, re.emoji); };
+          chip.onclick = (e) => { e.stopPropagation(); toggleReaction(m, re.emoji); };
           rc.appendChild(chip);
         }
-        bubble.appendChild(rc);
       }
-
-      const ttl = document.createElement("span");
-      ttl.className = "ttl";
-      ttl.textContent = "⌛ " + fmt(left);
-      bubble.appendChild(ttl);
-
-      // actions row: react (everyone) + edit/delete (sender only)
-      const acts = document.createElement("div");
-      acts.className = "actions";
-
-      const reactBtn = document.createElement("button");
-      reactBtn.className = "act";
-      reactBtn.textContent = "😊 react";
-      reactBtn.onclick = (e) => {
-        e.stopPropagation();
-        showReactPopup(reactBtn, m);
-      };
-      acts.appendChild(reactBtn);
-
-      if (mine) {
-        if (m.body || !m.attachment) {
-          const ed = document.createElement("button");
-          ed.className = "act"; ed.textContent = "edit";
-          ed.onclick = () => editMessage(m);
-          acts.appendChild(ed);
-        }
-        const del = document.createElement("button");
-        del.className = "act del"; del.textContent = "delete";
-        del.onclick = () => deleteMessage(m);
-        acts.appendChild(del);
-      }
-      bubble.appendChild(acts);
-
-      row.appendChild(bubble);
-      feed.appendChild(row);
     }
-    feed.scrollTop = feed.scrollHeight;
   }
 
-  // ── boot ──  
+  function render() {
+    const feed = $("feed");
+    const now = Date.now();
+    const live = messages.filter((m) => m.expiresAt > now);
+
+    if (!live.length) {
+      feed.innerHTML = '<div class="empty-note">No messages yet — say something.</div>';
+      msgEls.clear();
+      return;
+    }
+    // Drop the "empty" placeholder if it's there.
+    if (feed.firstChild && feed.firstChild.className === "empty-note") {
+      feed.innerHTML = "";
+    }
+
+    const liveIds = new Set(live.map((m) => m.id));
+
+    // Remove rows for messages that expired or were deleted.
+    for (const [id, entry] of msgEls) {
+      if (!liveIds.has(id)) {
+        entry.row.remove();
+        msgEls.delete(id);
+      }
+    }
+
+    let isNew = false;
+    for (const m of live) {
+      let entry = msgEls.get(m.id);
+      if (!entry) {
+        entry = buildMessageRow(m);
+        msgEls.set(m.id, entry);
+        feed.appendChild(entry.row);
+        isNew = true;
+      }
+      refreshMessageRow(entry, m, now);
+    }
+
+    // Only auto-scroll when a brand-new message arrived.
+    if (isNew) feed.scrollTop = feed.scrollHeight;
+  }
+
+  // ── boot ──
   loadRooms();
   setInterval(loadRooms, 5000);
 
